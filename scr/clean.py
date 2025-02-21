@@ -5,10 +5,16 @@ from nltk.stem import WordNetLemmatizer
 from nltk.tokenize import word_tokenize
 from bs4 import BeautifulSoup
 from textblob import TextBlob
+from nltk.sentiment import SentimentIntensityAnalyzer
+from nltk.tokenize import word_tokenize
+
+
+
 
 # Download necessary NLTK data
 nltk.download("punkt")
 nltk.download("wordnet")
+nltk.download("vader_lexicon")
 
 def remove_urls(text):
     """Removes URLs from the text."""
@@ -28,6 +34,13 @@ def lemmatize_text(text):
 def correct_spelling(text):
     """Corrects spelling mistakes in text."""
     return str(TextBlob(text).correct())
+
+
+def analyze_sentiment(text):
+    """Analyzes sentiment using VADER and returns a polarity score."""
+    sia = SentimentIntensityAnalyzer()
+    score = sia.polarity_scores(text)["compound"]  # Compound score
+    return "Positive" if score > 0.05 else "Negative" if score < -0.05 else "Neutral"
 
 def clean_youtube_comments(input_file, output_file):
     # Load the CSV file
@@ -60,6 +73,9 @@ def clean_youtube_comments(input_file, output_file):
     # Apply lemmatization on the text field
     # df["text"] = df["text"].apply(lemmatize_text)
 
+    # Perform sentiment analysis
+    df["sentiment"] = df["text"].apply(analyze_sentiment)
+
     # Convert 'likes' column to integers (handling any non-numeric values)
     df["likes"] = pd.to_numeric(df["likes"], errors="coerce").fillna(0).astype(int)
 
@@ -73,9 +89,11 @@ def clean_youtube_comments(input_file, output_file):
 
     # Save cleaned data to a new CSV file
     df.to_csv(output_file, index=False, encoding="utf-8")
-    print(f"Cleaned data saved to {output_file}")
+    print(f"Cleaned data with sentiment analysis saved to {output_file}")
 
 # Example usage
-input_file = "code\youtube_comments.csv"  # Replace with your actual file path
-output_file = "cleaned_youtube_comments.csv"
+input_file = "code/youtube_comments.csv"  # Replace with your actual file path
+# output_file = "cleaned_youtube_comments1.csv"
+output_file = "cleaned_youtube_comments_with_sentiment.csv"
 clean_youtube_comments(input_file, output_file)
+
