@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -7,24 +7,21 @@ import os
 import requests
 import re
 import nltk
-from nltk.stem import WordNetLemmatizer
 from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
 from bs4 import BeautifulSoup
-from textblob import TextBlob
 from urllib.parse import urlparse, parse_qs
 
-# Load environment variables
+# Load env
 load_dotenv()
 
-# Download necessary NLTK data
+# Download NLTK data
 nltk.download("punkt")
 nltk.download("wordnet")
 nltk.download("vader_lexicon")
 
-# Initialize FastAPI app
 app = FastAPI()
 
-# Allow frontend (localhost:5173) to connect
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -33,30 +30,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize VADER analyzer
 analyzer = SentimentIntensityAnalyzer()
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
-# Request body model
 class AnalyzeRequest(BaseModel):
     url: str
 
-
-
-# --- Cleaning Functions ---
-
-
-
+# Cleaners
 def remove_emojis(text):
-    """Remove all emojis from the given text."""
     emoji_pattern = re.compile(
-        "[" 
-        u"\U0001F600-\U0001F64F"  # emoticons
-        u"\U0001F300-\U0001F5FF"  # symbols & pictographs
-        u"\U0001F680-\U0001F6FF"  # transport & map symbols
-        u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
-        u"\U00002700-\U000027BF"  # Dingbats
-        u"\U000024C2-\U0001F251"  # Enclosed characters
+        "["
+        u"\U0001F600-\U0001F64F"
+        u"\U0001F300-\U0001F5FF"
+        u"\U0001F680-\U0001F6FF"
+        u"\U0001F1E0-\U0001F1FF"
+        u"\U00002700-\U000027BF"
+        u"\U000024C2-\U0001F251"
         "]+", flags=re.UNICODE)
     return emoji_pattern.sub(r'', text)
 
@@ -66,26 +55,12 @@ def remove_urls(text):
 def remove_html_tags(text):
     return BeautifulSoup(text, "html.parser").get_text()
 
-def lemmatize_text(text):
-    lemmatizer = WordNetLemmatizer()
-    words = word_tokenize(text)
-    lemmatized_words = [lemmatizer.lemmatize(word) for word in words]
-    return " ".join(lemmatized_words)
-
-def correct_spelling(text):
-    return str(TextBlob(text).correct())
-
 def clean_comment(text: str):
-    text = text.strip()
-    text = text.lower()
     text = remove_html_tags(text)
     text = remove_urls(text)
-    text = remove_emojis(text)
-    text = correct_spelling(text)
-    # text = lemmatize_text(text) # Optional
+    
     return text
 
-# --- NEW: LibreTranslate Function ---
 def translate_to_english(text: str) -> str:
     try:
         response = requests.post("https://libretranslate.com/translate", data={
@@ -98,76 +73,90 @@ def translate_to_english(text: str) -> str:
         return result.get("translatedText", text)
     except Exception as e:
         print(f"Translation failed: {e}")
-        return text  # fallback: return original text if API fails
+        return text
 
-# --- Helper Functions ---
 def extract_video_id(url: str):
     parsed_url = urlparse(url)
     if parsed_url.hostname in ["www.youtube.com", "youtube.com"]:
-        query_params = parse_qs(parsed_url.query)
-        return query_params.get("v", [None])[0]
+        return parse_qs(parsed_url.query).get("v", [None])[0]
     elif parsed_url.hostname == "youtu.be":
         return parsed_url.path.lstrip("/")
     return None
 
 def analyze_sentiment(text: str):
-    scores = analyzer.polarity_scores(text)
-    compound = scores['compound']
+    compound = analyzer.polarity_scores(text)["compound"]
     if compound >= 0.05:
         return "Positive"
     elif compound <= -0.05:
         return "Negative"
-    else:
-        return "Neutral"
+    return "Neutral"
 
-# --- Main Route ---
 @app.post("/analyze")
-async def analyze_comments(request: AnalyzeRequest):
+async def analyze_comments(request: AnalyzeRequest, page: int = Query(1, ge=1), limit: int = Query(10, le=100)):
     video_id = extract_video_id(request.url)
-
     if not video_id:
         raise HTTPException(status_code=400, detail="Invalid YouTube URL")
 
     try:
         youtube_api_url = "https://www.googleapis.com/youtube/v3/commentThreads"
-        params = {
-            "part": "snippet",
-            "videoId": video_id,
-            "key": YOUTUBE_API_KEY,
-            "maxResults": 10
-        }
-        response = requests.get(youtube_api_url, params=params)
-        response.raise_for_status()
+        comments = []
+        next_page_token = None
+        total_to_fetch = 100
 
-        comments = [
-            item['snippet']['topLevelComment']['snippet']['textDisplay']
-            for item in response.json().get('items', [])
-        ]
+        while len(comments) < total_to_fetch:
+            params = {
+                "part": "snippet",
+                "videoId": video_id,
+                "key": YOUTUBE_API_KEY,
+                "maxResults": 100,
+                "pageToken": next_page_token
+            }
+            response = requests.get(youtube_api_url, params=params)
+            response.raise_for_status()
+            data = response.json()
 
-        sentiments = []
+            for item in data.get("items", []):
+                comment = item["snippet"]["topLevelComment"]["snippet"]["textDisplay"]
+                comments.append(comment)
+                if len(comments) >= total_to_fetch:
+                    break
+
+            next_page_token = data.get("nextPageToken")
+            if not next_page_token:
+                break
+
+        # Analyze all comments for chart
+        all_sentiments = []
         for comment in comments:
-            cleaned_comment = clean_comment(comment)
-            
-            translated_comment = translate_to_english(cleaned_comment)
+            cleaned = clean_comment(comment)
+            translated = translate_to_english(cleaned)
+            if translated.strip():
+                sentiment = analyze_sentiment(translated)
+                all_sentiments.append(sentiment)
 
-            if translated_comment.strip() == "":
-                continue
-            else:
-                sentiment = analyze_sentiment(translated_comment)
-            sentiment = analyze_sentiment(translated_comment)
-            sentiments.append({
-                "comment": translated_comment,
-                "sentiment": sentiment
-                # "original_comment": comment,
-                # "cleaned_comment": cleaned_comment,
-                # "translated_comment": translated_comment,
-                # "sentiment": sentiment
-            })
+        # Analyze current page
+        sentiments = []
+        sentiment_summary = {"Positive": 0, "Neutral": 0, "Negative": 0}
+        paginated = comments[(page - 1) * limit: page * limit]
+        for comment in paginated:
+            cleaned = clean_comment(comment)
+            translated = translate_to_english(cleaned)
+            if translated.strip():
+                sentiment = analyze_sentiment(translated)
+                sentiment_summary[sentiment] += 1
+                sentiments.append({
+                    "comment": translated,
+                    "sentiment": sentiment
+                })
 
         return {
             "videoId": video_id,
-            "total_comments": len(sentiments),
-            "sentiments": sentiments
+            "page": page,
+            "limit": limit,
+            "total_fetched": len(all_sentiments),
+            "sentiments": sentiments,
+            "sentiment_summary": sentiment_summary,
+            "all_sentiments": all_sentiments
         }
 
     except Exception as e:
